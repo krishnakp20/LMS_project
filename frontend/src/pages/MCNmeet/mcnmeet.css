@@ -1,0 +1,233 @@
+.mcnmeet-shell {
+  min-height: 100vh;
+  background:
+    linear-gradient(90deg, rgba(20, 68, 157, .08), transparent 38%, rgba(23, 163, 83, .08)),
+    linear-gradient(135deg, #f7fbff 0%, #edf5ff 48%, #f4fbf7 100%);
+  color: #102542;
+}
+
+.mcnmeet-topbar {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 0 28px;
+  border-bottom: 3px solid #1aa65b;
+  background: rgba(255, 255, 255, .94);
+  backdrop-filter: blur(18px);
+}
+
+.mcnmeet-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.mcnmeet-brand img {
+  width: 118px;
+  height: auto;
+  object-fit: contain;
+}
+
+.mcnmeet-brand > span {
+  width: 1px;
+  height: 36px;
+  background: rgba(42, 64, 102, .18);
+}
+
+.mcnmeet-brand b {
+  display: block;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: 0;
+  color: #14449d;
+}
+
+.mcnmeet-brand small {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #18824d;
+  font-weight: 800;
+}
+
+.mcnmeet-topbar nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mcnmeet-topbar nav a,
+.mcnmeet-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid rgba(18, 61, 143, .18);
+  border-radius: 8px;
+  background: #fff;
+  color: #14449d;
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.mcnmeet-topbar nav .mcnmeet-open,
+.mcnmeet-primary {
+  border-color: transparent;
+  background: #14449d;
+  color: #fff;
+  box-shadow: 0 12px 28px rgba(20, 68, 157, .20);
+}
+
+.mcnmeet-stage {
+  min-height: calc(100vh - 72px);
+  display: grid;
+  grid-template-columns: minmax(300px, 390px) minmax(0, 1fr);
+  gap: 24px;
+  padding: 24px;
+}
+
+.mcnmeet-panel {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  padding: 28px;
+  border: 1px solid rgba(20, 68, 157, .16);
+  border-top: 5px solid #1aa65b;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .90);
+  box-shadow: 0 24px 60px rgba(20, 68, 157, .10);
+}
+
+.mcnmeet-room-mark {
+  width: 86px;
+  height: 86px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid rgba(20, 68, 157, .16);
+  background-image: url('/mcn-logo.png');
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 74px auto;
+  color: #fff;
+  font-size: 0;
+  box-shadow: 0 16px 34px rgba(20, 68, 157, .18);
+}
+
+.mcnmeet-eyebrow {
+  width: max-content;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: rgba(26, 166, 91, .12);
+  color: #137a46;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.mcnmeet-panel h1 {
+  margin: 0;
+  font-size: 34px;
+  line-height: 1.05;
+  color: #14449d;
+}
+
+.mcnmeet-panel p {
+  margin: 0;
+  color: #56657c;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.mcnmeet-panel dl {
+  display: grid;
+  gap: 8px;
+}
+
+.mcnmeet-panel dl div {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid rgba(42, 64, 102, .10);
+}
+
+.mcnmeet-panel dt {
+  color: #6f7d92;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.mcnmeet-panel dd {
+  color: #102542;
+  font-size: 12px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.mcnmeet-primary {
+  width: 100%;
+  min-height: 46px;
+}
+
+.mcnmeet-frame-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(42, 64, 102, .14);
+  border-radius: 8px;
+  background: #07111f;
+  box-shadow: 0 24px 70px rgba(8, 25, 55, .18);
+}
+
+.mcnmeet-frame-card iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: calc(100vh - 120px);
+  border: 0;
+  background: #07111f;
+}
+
+@media (max-width: 920px) {
+  .mcnmeet-stage {
+    grid-template-columns: 1fr;
+  }
+
+  .mcnmeet-frame-card iframe {
+    min-height: 68vh;
+  }
+}
+
+@media (max-width: 640px) {
+  .mcnmeet-topbar {
+    height: auto;
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 16px;
+  }
+
+  .mcnmeet-topbar nav,
+  .mcnmeet-topbar nav a {
+    width: 100%;
+  }
+
+  .mcnmeet-stage {
+    padding: 14px;
+  }
+
+  .mcnmeet-panel {
+    padding: 20px;
+  }
+
+  .mcnmeet-panel h1 {
+    font-size: 28px;
+  }
+}
