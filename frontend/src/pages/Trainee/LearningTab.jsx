@@ -384,7 +384,7 @@ function AssessmentCard({ assessment, result, onStart }) {
   );
 }
 
-function ContentViewerModal({ content, onClose, videoRef, onPauseChange, renderContentUrl }) {
+export function ContentViewerModal({ content, onClose, videoRef, onPauseChange, renderContentUrl }) {
   const media = content.resolvedMedia || renderContentUrl(content);
   const isVideo = content.contentType === 'video';
   const progress = content.progress;

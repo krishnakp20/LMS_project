@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer'; // ✅ ADDED: Required for Multer error handling
 import { requireSession, requireRole, requireSuperAdmin, requireRecentElevation } from '../middleware/auth.js';
 import { validate, classroomSchema, moduleSchema, assessmentSchema, batchSchema } from '../utils/validate.js';
 import {
@@ -63,7 +64,25 @@ router.put('/modules/:moduleId', ...auth, updateModule);
 router.delete('/modules/:moduleId', ...auth, deleteModule);
 
 router.get('/modules/:moduleId/contents', ...auth, listContents);
-router.post('/modules/:moduleId/contents', ...auth, contentUpload.single('file'), createContent);
+
+// ✅ UPDATED: Added manual Multer error handling to prevent 500 Internal Server Error
+router.post('/modules/:moduleId/contents', ...auth, (req, res, next) => {
+  contentUpload.single('file')(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ 
+          ok: false, 
+          message: 'File is too large. Maximum allowed size is 1GB.' 
+        });
+      }
+      return res.status(400).json({ ok: false, message: err.message });
+    } else if (err) {
+      return res.status(400).json({ ok: false, message: err.message });
+    }
+    next();
+  });
+}, createContent);
+
 router.put('/contents/:contentId', ...auth, updateContent);
 router.delete('/contents/:contentId', ...auth, deleteContent);
 

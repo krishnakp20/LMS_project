@@ -24,7 +24,54 @@ function safeFilename(value) {
   return decoded;
 }
 
+function directAssignmentWhere(trainee, employeeId) {
+  const OR = [
+    { assignedTo: employeeId, assignedToType: 'individual' },
+    { assignedToType: 'company' },
+  ];
+  if (trainee.batchNo) OR.push({ assignedTo: trainee.batchNo, assignedToType: 'batch' });
+  if (trainee.process) OR.push({ assignedTo: trainee.process, assignedToType: 'process' });
+  if (trainee.branch) OR.push({ assignedTo: trainee.branch, assignedToType: 'branch' });
+  return { active: true, OR };
+}
+
+async function hasDirectModuleAccess(trainee, moduleIds) {
+  const ids = (Array.isArray(moduleIds) ? moduleIds : [moduleIds]).filter(Boolean);
+  if (!ids.length) return false;
+  const assignment = await prisma.assignedModule.findFirst({
+    where: { ...directAssignmentWhere(trainee, trainee.employeeId), moduleId: { in: ids } },
+    select: { id: true },
+  });
+  return Boolean(assignment);
+}
+
+async function repositoryFileAccess(trainee, filename) {
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT m.module_id
+       FROM content_repository_master r
+       INNER JOIN independent_module_content_map m ON m.repository_content_id = r.repository_content_id
+       INNER JOIN independent_module_master im ON im.module_id = m.module_id
+       WHERE r.status = 'Active' AND m.active = 1 AND im.status = 'Active'
+         AND (REPLACE(r.direct_media_url, '\\\\', '/') LIKE ? OR REPLACE(r.local_file_path, '\\\\', '/') LIKE ?)
+       LIMIT 50`,
+      `%/${filename}`,
+      `%/${filename}`,
+    );
+    const moduleIds = [...new Set((rows || []).map(row => row.module_id).filter(Boolean))];
+    return moduleIds.length ? hasDirectModuleAccess(trainee, moduleIds) : false;
+  } catch {
+    return false;
+  }
+}
+
 async function traineeCanAccess(employeeId, filename) {
+  const trainee = await prisma.traineeMaster.findUnique({
+    where: { employeeId },
+    select: { employeeId: true, classroomId: true, batchNo: true, process: true, branch: true },
+  });
+  if (!trainee) return false;
+
   const contents = await prisma.contentMaster.findMany({
     where: {
       active: true,
@@ -32,25 +79,30 @@ async function traineeCanAccess(employeeId, filename) {
       module: { active: true },
     },
     select: {
+      moduleId: true,
       module: { select: { classroomId: true } },
     },
     take: 100,
   });
 
   const classroomIds = [...new Set(contents.map(row => row.module?.classroomId).filter(Boolean))];
-  if (!classroomIds.length) return false;
+  if (classroomIds.length) {
+    if (trainee.classroomId && classroomIds.includes(trainee.classroomId)) return true;
 
-  const trainee = await prisma.traineeMaster.findUnique({
-    where: { employeeId },
-    select: { classroomId: true },
-  });
-  if (trainee?.classroomId && classroomIds.includes(trainee.classroomId)) return true;
+    const mapping = await prisma.traineeClassroomMap.findFirst({
+      where: { employeeId, classroomId: { in: classroomIds }, active: true },
+      select: { id: true },
+    });
+    if (mapping) return true;
+  }
 
-  const mapping = await prisma.traineeClassroomMap.findFirst({
-    where: { employeeId, classroomId: { in: classroomIds }, active: true },
-    select: { id: true },
-  });
-  return Boolean(mapping);
+  // Content served from a module that was assigned directly to this learner
+  // (individual, batch, process, branch or company) must stay playable even
+  // when the learner is not a member of the module's classroom.
+  const moduleIds = [...new Set(contents.map(row => row.moduleId).filter(Boolean))];
+  if (moduleIds.length && await hasDirectModuleAccess(trainee, moduleIds)) return true;
+
+  return repositoryFileAccess(trainee, filename);
 }
 
 router.get('/files/:filename', contentFileLimiter, requireSession, async (req, res, next) => {

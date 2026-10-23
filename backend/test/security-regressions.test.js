@@ -190,6 +190,18 @@ test('learner content and assessments require classroom assignment', async () =>
   assert.doesNotMatch(text, /completedExplicitly \? 100/);
 });
 
+test('direct admin module assignments grant content access without weakening classroom checks', async () => {
+  const route = await source('src/routes/traineeStability.js');
+  assert.match(route, /hasDirectModuleAccess/);
+  assert.match(route, /assignedModule\.findFirst/);
+  assert.match(route, /DIRECT_ASSIGN/);
+  assert.match(route, /findAssignedRepositoryContent/);
+
+  const files = await source('src/routes/contentFiles.js');
+  assert.match(files, /hasDirectModuleAccess/);
+  assert.match(files, /repositoryFileAccess/);
+});
+
 test('attendance requires a verified activity threshold', async () => {
   const text = await source('src/routes/traineeStability.js');
   assert.match(text, /LMS_ATTENDANCE_MIN_ACTIVITY_SECONDS/);

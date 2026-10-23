@@ -4,7 +4,9 @@ import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync } from 'fs';
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || 'uploads';
-const MAX_MB = Number.parseInt(process.env.MAX_FILE_SIZE_MB || '200', 10);
+
+// UPDATE: Default file size limit increased to 1024MB (1GB)
+const MAX_MB = Number.parseInt(process.env.MAX_FILE_SIZE_MB || '1024', 10);
 
 function ensureDir(dir) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -65,8 +67,6 @@ export const csvUpload = multer({
   },
 });
 
-// SCORM ZIP is saved to a temporary directory. Archive extraction must still
-// enforce path, entry-count and uncompressed-size limits in the controller.
 const scormStorage = multer.diskStorage({
   destination(_req, _file, cb) {
     const dir = path.join(UPLOAD_DIR, 'scorm-tmp');
@@ -78,7 +78,8 @@ const scormStorage = multer.diskStorage({
   },
 });
 
-const SCORM_MAX_MB = Number.parseInt(process.env.SCORM_MAX_FILE_SIZE_MB || '500', 10);
+// UPDATE: SCORM file size limit also increased to 1GB
+const SCORM_MAX_MB = Number.parseInt(process.env.SCORM_MAX_FILE_SIZE_MB || '1024', 10);
 
 export const scormUpload = multer({
   storage: scormStorage,

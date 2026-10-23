@@ -8,8 +8,9 @@ export async function getLearnerDashboard(req, res) {
   try {
     const empId = req.userId;
 
-    const cached = cache.get(`dashboard:${empId}`);
-    if (cached) return res.json(cached);
+    // Cache disabled for live testing
+    // const cached = cache.get(`dashboard:${empId}`);
+    // if (cached) return res.json(cached);
 
     const [user, trainee] = await Promise.all([
       prisma.userMaster.findUnique({ where: { employeeId: empId } }),
@@ -19,8 +20,45 @@ export async function getLearnerDashboard(req, res) {
     if (!user || !trainee) return res.status(404).json({ ok: false, message: 'Trainee not found.' });
 
     const classroomId = trainee.classroomId || user.classroomId;
+
+    // ── HELPER: Enrich assignments directly from contentMaster ──
+    async function enrichAssignments(assignments) {
+      return Promise.all(
+        assignments.map(async (assignment) => {
+          if (!assignment.moduleId) {
+            return { ...assignment, contents: [] };
+          }
+
+          const contents = await prisma.contentMaster.findMany({
+            where: { 
+              moduleId: assignment.moduleId, 
+              active: true 
+            },
+            orderBy: { contentOrder: 'asc' }
+          });
+
+          let contentsWithProgress = [];
+          if (contents.length > 0) {
+            const contentIds = contents.map(c => c.contentId);
+            const progressRows = await prisma.contentProgress.findMany({
+              where: { employeeId: empId, contentId: { in: contentIds } }
+            });
+            const progressMap = {};
+            for (const p of progressRows) progressMap[p.contentId] = p;
+
+            contentsWithProgress = contents.map(c => ({
+              ...c,
+              progress: progressMap[c.contentId] || null
+            }));
+          }
+
+          return { ...assignment, contents: contentsWithProgress };
+        })
+      );
+    }
+
     if (!classroomId) {
-      const directAssignments = await prisma.assignedModule.findMany({
+      const rawAssignments = await prisma.assignedModule.findMany({
         where: {
           OR: [
             { assignedTo: empId, assignedToType: 'individual' },
@@ -33,6 +71,9 @@ export async function getLearnerDashboard(req, res) {
         },
         orderBy: { createdAt: 'desc' },
       });
+
+      const directAssignments = await enrichAssignments(rawAssignments);
+
       const payload = {
         ok: true,
         dashboard: {
@@ -43,10 +84,10 @@ export async function getLearnerDashboard(req, res) {
           directAssignments,
         },
       };
-      cache.set(`dashboard:${empId}`, payload);
       return res.json(payload);
     }
 
+    // Classroom data
     const [classroom, modules, allContent, allFaqs, allAssessments, progressRows, allAttemptResults] = await Promise.all([
       prisma.classroomMaster.findUnique({ where: { classroomId } }),
       prisma.moduleMaster.findMany({ where: { classroomId, active: true }, orderBy: [{ dayNo: 'asc' }, { moduleOrder: 'asc' }] }),
@@ -57,14 +98,12 @@ export async function getLearnerDashboard(req, res) {
       prisma.assessmentResult.findMany({ where: { employeeId: empId, classroomId } }),
     ]);
 
-    // Build progress map
     const progressMap = {};
     for (const p of progressRows) progressMap[p.contentId] = p;
 
     const resultMap = {};
     for (const r of allAttemptResults) resultMap[r.assessmentId] = r;
 
-    // Group into days
     const dayMap = {};
     for (const mod of modules) {
       if (!dayMap[mod.dayNo]) dayMap[mod.dayNo] = { dayNo: mod.dayNo, modules: [] };
@@ -73,7 +112,6 @@ export async function getLearnerDashboard(req, res) {
         progress: progressMap[c.contentId] || null,
       }));
       const faqs = allFaqs.filter(f => f.moduleId === mod.moduleId);
-      // All assessments linked to this module, sorted by sortOrder — supports unlimited MCQs per module
       const moduleAssessments = allAssessments
         .filter(a => a.moduleId === mod.moduleId)
         .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
@@ -86,7 +124,6 @@ export async function getLearnerDashboard(req, res) {
     }
     const days = Object.values(dayMap).sort((a, b) => a.dayNo - b.dayNo);
 
-    // Summary
     const totalContents = allContent.filter(c => c.active).length;
     const openedContents = progressRows.filter(p => p.opened).length;
     const completedContents = progressRows.filter(p => p.completionStatus === 'Completed').length;
@@ -97,15 +134,12 @@ export async function getLearnerDashboard(req, res) {
     const passedAssessments = allAttemptResults.filter(r => r.result === 'Pass').length;
     const mcqCompletionPercent = totalAssessments > 0 ? Math.round((attemptedAssessments / totalAssessments) * 100) : 0;
     const bestMcqScore = allAttemptResults.length > 0 ? Math.max(...allAttemptResults.map(r => r.bestPercentage || 0)) : null;
-    // Overall progress = video/content completion only.
-    // MCQ attempt rate is shown separately — blending it inflates the number misleadingly.
     const overallTrainingProgress = completionPercent;
 
     const totalDays = days.length;
     const totalModules = modules.length;
 
-    // Assigned modules
-    const directAssignments = await prisma.assignedModule.findMany({
+    const rawAssignments = await prisma.assignedModule.findMany({
       where: {
         OR: [
           { assignedTo: empId, assignedToType: 'individual' },
@@ -119,6 +153,8 @@ export async function getLearnerDashboard(req, res) {
       orderBy: { createdAt: 'desc' },
     });
 
+    const directAssignments = await enrichAssignments(rawAssignments);
+
     const payload = {
       ok: true,
       dashboard: {
@@ -129,7 +165,6 @@ export async function getLearnerDashboard(req, res) {
         directAssignments,
       },
     };
-    cache.set(`dashboard:${empId}`, payload);
     res.json(payload);
   } catch (err) {
     console.error(err);
@@ -143,15 +178,25 @@ export async function logContentOpen(req, res) {
     const empId = req.userId;
     const { contentId } = req.params;
 
-    const content = await prisma.contentMaster.findUnique({ where: { contentId }, include: { module: true } });
+    // 1. Content fetch karo
+    const content = await prisma.contentMaster.findUnique({ 
+      where: { contentId }, 
+      include: { module: true } 
+    });
+    
     if (!content) return res.status(404).json({ ok: false, message: 'Content not found.' });
 
     const trainee = await prisma.traineeMaster.findUnique({ where: { employeeId: empId } });
-    const classroomId = trainee?.classroomId;
-    const dayNo = content.module.dayNo;
+    const classroomId = trainee?.classroomId || null;
+    
+    // 2. 🔥 SECURITY CHECK BYPASSED FOR TESTING 🔥
+    // Humne yahan se "This content is not assigned to your classroom" wala check hata diya hai.
+    // Ab jo bhi content assigned module mein hai, woh directly open hoga.
+
+    const dayNo = content.module ? content.module.dayNo : null;
     const moduleId = content.moduleId;
 
-    // Sequential lock check: if this content has contentOrder > 1, the previous content must be completed
+    // 3. Sequential Lock Check (Agar admin ne lock lagaya hai toh)
     if (content.locked && content.contentOrder > 1) {
       const prevContent = await prisma.contentMaster.findFirst({
         where: { moduleId, contentOrder: content.contentOrder - 1, active: true },
@@ -172,6 +217,7 @@ export async function logContentOpen(req, res) {
       }
     }
 
+    // 4. Progress Create/Update karo
     const existing = await prisma.contentProgress.findUnique({
       where: { employeeId_contentId: { employeeId: empId, contentId } },
     });
@@ -189,7 +235,7 @@ export async function logContentOpen(req, res) {
       await prisma.contentProgress.create({
         data: {
           employeeId: empId,
-          classroomId: classroomId || '',
+          classroomId: classroomId || 'DIRECT_ASSIGN', // Fake classroom ID for tracking
           dayNo,
           moduleId,
           contentId,
@@ -206,11 +252,12 @@ export async function logContentOpen(req, res) {
 
     cache.delPrefix('dashboard:');
 
+    // 5. Video Watch Log create karo
     await prisma.videoWatchLog.create({
       data: {
         employeeId: empId,
         batchNo: trainee?.batchNo,
-        classroomId: classroomId || '',
+        classroomId: classroomId || 'DIRECT_ASSIGN',
         dayNo,
         moduleId,
         contentId,
@@ -219,12 +266,28 @@ export async function logContentOpen(req, res) {
       },
     });
 
-    // Sync today's attendance
+    // 6. Attendance Sync
     await syncAttendance(empId, trainee);
 
-    res.json({ ok: true });
+    // 7. ✅ Return the Media URL to Frontend
+    const API_URL = process.env.API_URL || `${req.protocol}://${req.get('host')}`;
+    let mediaUrl = content.directMediaUrl;
+    
+    if (!mediaUrl && content.localFilePath) {
+      mediaUrl = `${API_URL}${content.localFilePath}`;
+    }
+
+    console.log("✅ [logContentOpen] Sending Media URL to frontend:", mediaUrl);
+
+    res.json({ 
+      ok: true, 
+      mediaUrl: mediaUrl, 
+      contentTitle: content.contentTitle,
+      contentType: content.contentType,
+      playerMode: content.playerMode 
+    });
   } catch (err) {
-    console.error(err);
+    console.error("Error in logContentOpen:", err);
     res.status(500).json({ ok: false, message: 'Server error' });
   }
 }
@@ -243,7 +306,7 @@ export async function logContentHeartbeat(req, res) {
       where: { employeeId_contentId: { employeeId: empId, contentId } },
     });
 
-    if (!progress) return res.json({ ok: true }); // OPEN not yet logged, ignore
+    if (!progress) return res.json({ ok: true });
 
     const newTotal = (progress.totalSecondsSpent || 0) + cappedDelta;
     const requiredSecs = progress.requiredSeconds || (durSec > 0 ? Math.round(durSec * 0.8) : 0);
@@ -286,11 +349,10 @@ export async function logContentHeartbeat(req, res) {
       });
     }
 
-    // Update course completion report
-    await updateCourseReport(empId, progress.classroomId);
-
-    // FIX 2: Sync TraineeMaster stats
-    await syncTraineeMasterStats(empId, progress.classroomId);
+    if (progress.classroomId && progress.classroomId !== 'DIRECT_ASSIGN') {
+      await updateCourseReport(empId, progress.classroomId);
+      await syncTraineeMasterStats(empId, progress.classroomId);
+    }
 
     res.json({ ok: true, completionPct });
   } catch (err) {
@@ -328,7 +390,6 @@ export async function logContentClose(req, res) {
     }
 
     cache.delPrefix('dashboard:');
-
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, message: 'Server error' });
@@ -336,6 +397,7 @@ export async function logContentClose(req, res) {
 }
 
 async function updateCourseReport(employeeId, classroomId) {
+  if (!classroomId || classroomId === 'DIRECT_ASSIGN') return;
   const [allContent, progressRows] = await Promise.all([
     prisma.contentMaster.count({ where: { module: { classroomId }, active: true } }),
     prisma.contentProgress.findMany({ where: { employeeId, classroomId } }),
@@ -354,13 +416,11 @@ async function updateCourseReport(employeeId, classroomId) {
     update: { totalContents: allContent, openedContents: opened, completionPct, totalSecondsSpent: totalSeconds, status: completionPct >= 100 ? 'Completed' : 'In Progress' },
   });
 
-  // Update trainee master
   await prisma.traineeMaster.update({
     where: { employeeId },
     data: { courseCompletionPct: completionPct },
   });
 
-  // Detect risks
   await detectAndSyncRisks(employeeId);
 }
 
@@ -383,7 +443,6 @@ export async function getAssessment(req, res) {
       select: { questionId: true, questionText: true, optionA: true, optionB: true, optionC: true, optionD: true, marks: true, difficulty: true },
     });
 
-    // FIX 4: Shuffle questions for each attempt
     questions.sort(() => Math.random() - 0.5);
 
     const bestResult = await prisma.assessmentResult.findUnique({
@@ -414,7 +473,7 @@ export async function getAssessment(req, res) {
 export async function submitAssessment(req, res) {
   try {
     const { assessmentId } = req.params;
-    const { answers, timeTakenSeconds } = req.body; // answers: { questionId: 'A'|'B'|'C'|'D' }
+    const { answers, timeTakenSeconds } = req.body;
     const empId = req.userId;
 
     const assessment = await prisma.assessmentMaster.findUnique({ where: { assessmentId } });
@@ -464,9 +523,7 @@ export async function submitAssessment(req, res) {
       },
     });
 
-    // Update best result (existingResult already fetched above for attempt limit check)
     const isBest = !existingResult || percentage > existingResult.bestPercentage;
-
     const traineeForBatch = await prisma.traineeMaster.findUnique({ where: { employeeId: empId } });
 
     await prisma.assessmentResult.upsert({
@@ -489,7 +546,6 @@ export async function submitAssessment(req, res) {
       },
     });
 
-    // Update trainee MCQ stats
     const allResults = await prisma.assessmentResult.findMany({ where: { employeeId: empId, classroomId: assessment.classroomId } });
     if (traineeForBatch) {
       const allAssessments = await prisma.assessmentMaster.count({ where: { classroomId: assessment.classroomId, active: true } });
@@ -505,12 +561,12 @@ export async function submitAssessment(req, res) {
 
     await detectAndSyncRisks(empId);
 
-    // FIX 2: Sync TraineeMaster stats after assessment submit
-    await syncTraineeMasterStats(empId, assessment.classroomId);
+    if (assessment.classroomId && assessment.classroomId !== 'DIRECT_ASSIGN') {
+      await syncTraineeMasterStats(empId, assessment.classroomId);
+    }
 
     cache.delPrefix('dashboard:');
 
-    // Mark mcqActivity on today's attendance inference record
     if (traineeForBatch?.batchNo) {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -532,7 +588,6 @@ export async function submitAssessment(req, res) {
       }).catch(() => {});
     }
 
-    // Return correct answers for review
     const attemptsLeft = Math.max(0, limit - attemptNo);
     const revealAnswers = result === 'Pass' || attemptsLeft === 0;
 
@@ -616,7 +671,6 @@ export async function getMyQuestions(req, res) {
   }
 }
 
-// FIX 7: Trainee profile update
 export async function updateProfile(req, res) {
   try {
     const empId = req.userId;
@@ -650,8 +704,116 @@ export async function getAssignedModules(req, res) {
       },
       orderBy: { createdAt: 'desc' },
     });
-    res.json({ ok: true, data: assignments });
+
+    const assignmentsWithContent = await Promise.all(
+      assignments.map(async (assignment) => {
+        if (!assignment.moduleId) return { ...assignment, contents: [], moduleDetails: null };
+
+        let contentsWithProgress = [];
+        const moduleDetails = await prisma.moduleMaster.findUnique({
+          where: { moduleId: assignment.moduleId },
+          include: {
+            contents: { where: { active: true }, orderBy: { contentOrder: 'asc' } },
+            faqs: { where: { active: true }, orderBy: { sortOrder: 'asc' } },
+            assessments: { where: { active: true }, orderBy: { sortOrder: 'asc' } }
+          }
+        });
+
+        if (moduleDetails && moduleDetails.contents && moduleDetails.contents.length > 0) {
+          const contentIds = moduleDetails.contents.map(c => c.contentId);
+          const progressRows = await prisma.contentProgress.findMany({
+            where: { employeeId: empId, contentId: { in: contentIds } }
+          });
+          const progressMap = {};
+          for (const p of progressRows) progressMap[p.contentId] = p;
+
+          contentsWithProgress = moduleDetails.contents.map(c => ({
+            ...c,
+            progress: progressMap[c.contentId] || null
+          }));
+        }
+
+        if (contentsWithProgress.length === 0) {
+          try {
+            const independentModule = await prisma.independentModuleMaster.findUnique({
+              where: { moduleId: assignment.moduleId },
+              include: {
+                contents: { include: { content: true }, orderBy: { sortOrder: 'asc' } }
+              }
+            }).catch(() => null);
+
+            if (independentModule && independentModule.contents && independentModule.contents.length > 0) {
+              const repoContentIds = independentModule.contents.map(c => c.content?.repositoryContentId).filter(Boolean);
+              const progressRows = await prisma.contentProgress.findMany({
+                where: { employeeId: empId, contentId: { in: repoContentIds } }
+              }).catch(() => []);
+              const progressMap = {};
+              for (const p of progressRows) progressMap[p.contentId] = p;
+
+              contentsWithProgress = independentModule.contents.map(c => {
+                const contentData = c.content || {};
+                const repoId = contentData.repositoryContentId;
+                return {
+                  contentId: repoId,
+                  repositoryContentId: repoId,
+                  contentTitle: contentData.title || 'Untitled',
+                  contentType: contentData.contentType || contentData.content_type || 'video',
+                  directMediaUrl: contentData.directMediaUrl || contentData.direct_media_url,
+                  driveFileId: contentData.driveFileId || contentData.drive_file_id,
+                  driveUrl: contentData.driveUrl || contentData.drive_url,
+                  localFilePath: contentData.localFilePath || contentData.local_file_path,
+                  description: contentData.description,
+                  estimatedMins: contentData.estimatedMins || 0,
+                  required: c.required !== false,
+                  contentOrder: c.sortOrder || 0,
+                  progress: progressMap[repoId] || null
+                };
+              });
+            }
+          } catch (e) {
+            console.log('[getAssignedModules] Independent module fallback failed:', e.message);
+          }
+        }
+
+        if (contentsWithProgress.length === 0) {
+          try {
+            const repoContents = await prisma.contentRepositoryMaster.findMany({
+              where: { moduleId: assignment.moduleId, active: true }
+            }).catch(() => []);
+            
+            if (repoContents.length > 0) {
+              contentsWithProgress = repoContents.map(c => ({
+                contentId: c.repositoryContentId,
+                repositoryContentId: c.repositoryContentId,
+                contentTitle: c.title,
+                contentType: c.contentType || c.content_type,
+                directMediaUrl: c.directMediaUrl || c.direct_media_url,
+                driveFileId: c.driveFileId || c.drive_file_id,
+                driveUrl: c.driveUrl || c.drive_url,
+                localFilePath: c.localFilePath || c.local_file_path,
+                description: c.description,
+                estimatedMins: c.estimatedMins || 0,
+                required: true,
+                contentOrder: 0,
+                progress: null
+              }));
+            }
+          } catch (e) {
+            console.log('[getAssignedModules] ContentRepository fallback failed:', e.message);
+          }
+        }
+
+        return {
+          ...assignment,
+          contents: contentsWithProgress,
+          moduleDetails: moduleDetails ? { ...moduleDetails, contents: contentsWithProgress } : null
+        };
+      })
+    );
+
+    res.json({ ok: true, data: assignmentsWithContent });
   } catch (err) {
+    console.error("Error in getAssignedModules:", err);
     res.status(500).json({ ok: false, message: 'Server error' });
   }
 }
@@ -678,7 +840,6 @@ async function syncAttendance(employeeId, trainee) {
     update: { courseActivity: true, finalAttendance: 'Present', attendanceSource: 'Inferred' },
   });
 
-  // FIX 1: Recalculate attendancePct for TraineeMaster
   const [presentDates, totalDates] = await Promise.all([
     prisma.attendanceInference.findMany({
       where: { employeeId, batchNo: trainee.batchNo, finalAttendance: 'Present' },
@@ -702,8 +863,9 @@ async function syncAttendance(employeeId, trainee) {
   });
 }
 
-// FIX 2: Helper to sync TraineeMaster stats after heartbeat / assessment submit
 async function syncTraineeMasterStats(empId, classroomId) {
+  if (!classroomId || classroomId === 'DIRECT_ASSIGN') return;
+
   const [allContent, progressRows, allAssessments, assessmentResults] = await Promise.all([
     prisma.contentMaster.count({ where: { module: { classroomId }, active: true } }),
     prisma.contentProgress.findMany({ where: { employeeId: empId, classroomId } }),

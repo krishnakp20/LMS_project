@@ -73,6 +73,11 @@ export default function TraineePage() {
     setForceReset(false);
   }
 
+
+  async function name(params) {
+    
+  }
+
   if (session === 'checking' || loading) return <div className="wrap" style={{ paddingTop: 60, textAlign: 'center' }}><div className="spinner" /></div>;
   if (session === 'none') return <LoginView onLogin={handleLogin} />;
   if (error) {

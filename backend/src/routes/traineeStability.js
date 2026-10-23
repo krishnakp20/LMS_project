@@ -117,18 +117,92 @@ async function hasClassroomAccess(trainee, classroomId) {
   return Boolean(mapping);
 }
 
+function directAssignmentWhere(trainee, employeeId) {
+  const OR = [
+    { assignedTo: employeeId, assignedToType: 'individual' },
+    { assignedToType: 'company' },
+  ];
+  if (trainee.batchNo) OR.push({ assignedTo: trainee.batchNo, assignedToType: 'batch' });
+  if (trainee.process) OR.push({ assignedTo: trainee.process, assignedToType: 'process' });
+  if (trainee.branch) OR.push({ assignedTo: trainee.branch, assignedToType: 'branch' });
+  return { active: true, OR };
+}
+
+async function hasDirectModuleAccess(trainee, moduleIds) {
+  const ids = (Array.isArray(moduleIds) ? moduleIds : [moduleIds]).filter(Boolean);
+  if (!trainee || !ids.length) return false;
+  const assignment = await prisma.assignedModule.findFirst({
+    where: { ...directAssignmentWhere(trainee, trainee.employeeId), moduleId: { in: ids } },
+    select: { id: true },
+  });
+  return Boolean(assignment);
+}
+
+async function findAssignedRepositoryContent(trainee, contentId) {
+  if (!contentId) return null;
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT r.*, m.module_id, m.sort_order, m.required
+       FROM independent_module_content_map m
+       INNER JOIN content_repository_master r ON r.repository_content_id = m.repository_content_id
+       INNER JOIN independent_module_master im ON im.module_id = m.module_id
+       WHERE m.active = 1 AND r.status = 'Active' AND im.status = 'Active'
+         AND m.repository_content_id = ?
+       LIMIT 5`,
+      contentId,
+    );
+    for (const row of rows || []) {
+      if (!await hasDirectModuleAccess(trainee, row.module_id)) continue;
+      return {
+        contentId: row.repository_content_id,
+        contentTitle: row.title,
+        contentType: row.content_type,
+        directMediaUrl: row.direct_media_url,
+        localFilePath: row.local_file_path,
+        playerMode: row.player_mode || 'Auto',
+        estimatedMins: row.estimated_mins || 0,
+        completionRulePct: row.completion_rule_pct,
+        description: row.description,
+        required: Boolean(row.required),
+        contentOrder: row.sort_order || 0,
+        moduleId: row.module_id,
+        module: { classroomId: null, dayNo: 0 },
+      };
+    }
+  } catch (error) {
+    if (!/doesn't exist|unknown table/i.test(String(error.message))) {
+      console.error('[traineeStability] repository content lookup failed:', error.message);
+    }
+  }
+  return null;
+}
+
 async function requireContentAccess(employeeId, contentId) {
-  const [trainee, content] = await Promise.all([
-    getTrainee(employeeId),
-    prisma.contentMaster.findUnique({ where: { contentId }, include: { module: true } }),
-  ]);
+  const trainee = await getTrainee(employeeId);
   if (!trainee) return { error: { status: 404, message: 'Trainee not found.' } };
-  if (!content || !content.active || !content.module?.active) return { error: { status: 404, message: 'Content not found.' } };
-  const classroomId = content.module.classroomId;
-  if (!await hasClassroomAccess(trainee, classroomId)) {
+
+  const content = await prisma.contentMaster.findUnique({ where: { contentId }, include: { module: true } });
+  if (content) {
+    if (!content.active || !content.module?.active) {
+      return { error: { status: 404, message: 'Content not found.' } };
+    }
+    const classroomId = content.module.classroomId;
+    if (await hasClassroomAccess(trainee, classroomId)) {
+      return { trainee, content, classroomId, directOnly: false };
+    }
+    // A module can also be assigned straight to the learner (individual, batch,
+    // process, branch or company) from the admin portal. That assignment must
+    // grant access even when the learner is not a member of its classroom.
+    if (await hasDirectModuleAccess(trainee, content.moduleId)) {
+      return { trainee, content, classroomId: 'DIRECT_ASSIGN', directOnly: true };
+    }
     return { error: { status: 403, message: 'This content is not assigned to your classroom.' } };
   }
-  return { trainee, content, classroomId };
+
+  // Independent/repository modules are tracked outside content_master.
+  const repositoryContent = await findAssignedRepositoryContent(trainee, contentId);
+  if (!repositoryContent) return { error: { status: 404, message: 'Content not found.' } };
+  return { trainee, content: repositoryContent, classroomId: 'DIRECT_ASSIGN', directOnly: true };
 }
 
 async function requireAssessmentAccess(employeeId, assessmentId) {
@@ -233,16 +307,7 @@ function requiredSecondsFor(content, durationSeconds = 0) {
 
 async function getDirectAssignments(trainee, employeeId) {
   return prisma.assignedModule.findMany({
-    where: {
-      OR: [
-        { assignedTo: employeeId, assignedToType: 'individual' },
-        { assignedTo: trainee.batchNo || '', assignedToType: 'batch' },
-        { assignedTo: trainee.process || '', assignedToType: 'process' },
-        { assignedTo: trainee.branch || '', assignedToType: 'branch' },
-        { assignedToType: 'company' },
-      ],
-      active: true,
-    },
+    where: directAssignmentWhere(trainee, employeeId),
     orderBy: { createdAt: 'desc' },
   });
 }
@@ -284,7 +349,7 @@ async function enrichIndependentAssignments(assignments) {
 }
 
 async function syncCourseAndTraineeStats(employeeId, classroomId) {
-  if (!employeeId || !classroomId) return;
+  if (!employeeId || !classroomId || classroomId === 'DIRECT_ASSIGN') return;
   const [totalContent, progressRows, totalAssessments, assessmentResults, trainee] = await Promise.all([
     prisma.contentMaster.count({ where: { module: { classroomId }, active: true } }),
     prisma.contentProgress.findMany({ where: { employeeId, classroomId } }),
@@ -403,17 +468,19 @@ router.post('/content/:contentId/open', ...auth, async (req, res) => {
     const employeeId = req.userId;
     const access = await requireContentAccess(employeeId, req.params.contentId);
     if (access.error) return res.status(access.error.status).json({ ok: false, message: access.error.message });
-    const { trainee, content, classroomId } = access;
+    const { trainee, content, classroomId, directOnly } = access;
 
-    const allContent = await prisma.contentMaster.findMany({ where: { module: { classroomId }, active: true }, include: { module: true } });
-    const priorRequired = allContent.filter(item => item.required).sort(contentSort);
-    const index = priorRequired.findIndex(item => item.contentId === content.contentId);
-    if (content.required && index > 0 && process.env.LMS_SEQUENTIAL_UNLOCK_DISABLED !== 'true') {
-      const previous = priorRequired.slice(0, index);
-      const progress = await prisma.contentProgress.findMany({ where: { employeeId, contentId: { in: previous.map(item => item.contentId) } } });
-      const progressMap = new Map(progress.map(row => [row.contentId, row]));
-      const missing = previous.find(item => !isComplete(progressMap.get(item.contentId)));
-      if (missing) return res.status(403).json({ ok: false, locked: true, message: `Complete "${missing.contentTitle}" first to unlock this content.`, prerequisiteContentId: missing.contentId, prerequisiteTitle: missing.contentTitle });
+    if (!directOnly) {
+      const allContent = await prisma.contentMaster.findMany({ where: { module: { classroomId }, active: true }, include: { module: true } });
+      const priorRequired = allContent.filter(item => item.required).sort(contentSort);
+      const index = priorRequired.findIndex(item => item.contentId === content.contentId);
+      if (content.required && index > 0 && process.env.LMS_SEQUENTIAL_UNLOCK_DISABLED !== 'true') {
+        const previous = priorRequired.slice(0, index);
+        const progress = await prisma.contentProgress.findMany({ where: { employeeId, contentId: { in: previous.map(item => item.contentId) } } });
+        const progressMap = new Map(progress.map(row => [row.contentId, row]));
+        const missing = previous.find(item => !isComplete(progressMap.get(item.contentId)));
+        if (missing) return res.status(403).json({ ok: false, locked: true, message: `Complete "${missing.contentTitle}" first to unlock this content.`, prerequisiteContentId: missing.contentId, prerequisiteTitle: missing.contentTitle });
+      }
     }
 
     const existing = await prisma.contentProgress.findUnique({ where: { employeeId_contentId: { employeeId, contentId: content.contentId } } });
